@@ -1,14 +1,16 @@
 import logging
 
 from lxml import etree
+from requests_toolbelt.multipart.decoder import MultipartDecoder
 
-from zeep import plugins, wsa
+from zeep import ns, plugins, wsa
 from zeep.exceptions import Fault, TransportError, XMLSyntaxError
 from zeep.parser import parse_xml
-from zeep.utils import as_qname, qname_attr
+from zeep.utils import as_qname, qname_attr, get_media_type
+from zeep.wsdl.attachments import MessagePack
 from zeep.wsdl.definitions import Binding, Operation
 from zeep.wsdl.messages import DocumentMessage, RpcMessage
-from zeep.wsdl.utils import etree_to_string
+from zeep.wsdl.utils import etree_to_string, url_http_to_https
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ class SoapBinding(Binding):
 
             # Apply WSSE
             if client.wsse:
-                envelope, http_headers = client.wsse.sign(envelope, http_headers)
+                envelope, http_headers = client.wsse.apply(envelope, http_headers)
         return envelope, http_headers
 
     def send(self, client, options, operation, args, kwargs):
@@ -128,8 +130,22 @@ class SoapBinding(Binding):
                 u'Server returned HTTP status %d (no content available)'
                 % response.status_code)
 
+        content_type = response.headers.get('Content-Type', 'text/xml')
+        media_type = get_media_type(content_type)
+
+        if media_type == 'multipart/related':
+            decoder = MultipartDecoder(
+                response.content, content_type, response.encoding)
+
+            content = decoder.parts[0].content
+            if len(decoder.parts) > 1:
+                message_pack = MessagePack(parts=decoder.parts[1:])
+        else:
+            content = response.content
+            message_pack = None
+
         try:
-            doc = parse_xml(response.content, recover=True)
+            doc = parse_xml(content)
         except XMLSyntaxError:
             raise TransportError(
                 u'Server returned HTTP status %d (%s)'
@@ -148,7 +164,12 @@ class SoapBinding(Binding):
         if response.status_code != 200 or fault_node is not None:
             return self.process_error(doc, operation)
 
-        return operation.process_reply(doc)
+        result = operation.process_reply(doc)
+
+        if message_pack:
+            message_pack._set_root(result)
+            return message_pack
+        return result
 
     def process_error(self, doc, operation):
         raise NotImplementedError
@@ -158,9 +179,10 @@ class SoapBinding(Binding):
 
         # Force the usage of HTTPS when the force_https boolean is true
         location = address_node.get('location')
-        if force_https and location and location.startswith('http://'):
-            logger.warning("Forcing soap:address location to HTTPS")
-            location = 'https://' + location[7:]
+        if force_https and location:
+            location = url_http_to_https(location)
+            if location != address_node.get('location'):
+                logger.warning("Forcing soap:address location to HTTPS")
 
         return {
             'address': location
@@ -207,10 +229,10 @@ class SoapBinding(Binding):
 
 class Soap11Binding(SoapBinding):
     nsmap = {
-        'soap': 'http://schemas.xmlsoap.org/wsdl/soap/',
-        'soap-env': 'http://schemas.xmlsoap.org/soap/envelope/',
-        'wsdl': 'http://schemas.xmlsoap.org/wsdl/',
-        'xsd': 'http://www.w3.org/2001/XMLSchema',
+        'soap': ns.SOAP_11,
+        'soap-env': ns.SOAP_ENV_11,
+        'wsdl': ns.WSDL,
+        'xsd': ns.XSD,
     }
 
     def process_error(self, doc, operation):
@@ -241,10 +263,10 @@ class Soap11Binding(SoapBinding):
 
 class Soap12Binding(SoapBinding):
     nsmap = {
-        'soap': 'http://schemas.xmlsoap.org/wsdl/soap12/',
-        'soap-env': 'http://www.w3.org/2003/05/soap-envelope',
-        'wsdl': 'http://schemas.xmlsoap.org/wsdl/',
-        'xsd': 'http://www.w3.org/2001/XMLSchema',
+        'soap': ns.SOAP_12,
+        'soap-env': ns.SOAP_ENV_12,
+        'wsdl': ns.WSDL,
+        'xsd': ns.XSD,
     }
 
     def process_error(self, doc, operation):

@@ -5,19 +5,12 @@ Zeep: Python SOAP client
 A fast and modern Python SOAP client
 
 Highlights:
- * Modern codebase compatible with Python 2.7, 3.3, 3.4, 3.5, 3.6 and PyPy
+ * Compatible with Python 2.7, 3.3, 3.4, 3.5, 3.6 and PyPy
  * Build on top of lxml and requests
- * Supports recursive WSDL and XSD documents.
- * Supports the xsd:choice and xsd:any elements.
- * Uses the defusedxml module for handling potential XML security issues
- * Support for WSSE (UsernameToken only for now)
- * Experimental support for HTTP bindings
- * Experimental support for WS-Addressing headers
+ * Support for Soap 1.1, Soap 1.2 and HTTP bindings
+ * Support for WS-Addressing headers
+ * Support for WSSE (UserNameToken / x.509 signing)
  * Experimental support for asyncio via aiohttp (Python 3.5+)
-
-Features still in development include:
- * WSSE x.509 support (BinarySecurityToken)
- * WS Policy support
 
 
 A simple example:
@@ -84,6 +77,16 @@ platforms::
     pip install lxml==3.7.1 zeep
 
 
+When you want to use wsse.Signature() you will need to install the python
+xmlsec module. This can be done by install the ``xlmsec`` extras::
+
+    pip install zeep[xmlsec]
+
+For the asyncio support in Python 3.5+ the aiohttp module is required, this 
+can be installed with the ``async`` extras::
+
+    pip install zeep[async]
+
 
 Getting started
 ===============
@@ -138,6 +141,7 @@ User guide
    headers
    transport
    datastructures
+   attachments
    wsa
    wsse
    plugins

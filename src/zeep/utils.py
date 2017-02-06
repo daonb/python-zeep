@@ -1,15 +1,7 @@
+import cgi
 import inspect
 
-
 from lxml import etree
-
-
-class _NotSetClass(object):
-    def __repr__(self):
-        return 'NotSet'
-
-
-NotSet = _NotSetClass()
 
 
 def qname_attr(node, attr_name, target_namespace=None):
@@ -65,3 +57,14 @@ def get_base_class(objects):
             break
         base_class = bases[0][i]
     return base_class
+
+
+def detect_soap_env(envelope):
+    root_tag = etree.QName(envelope)
+    return root_tag.namespace
+
+
+def get_media_type(value):
+    """Parse a HTTP content-type header and return the media-type"""
+    main_value, parameters = cgi.parse_header(value)
+    return main_value

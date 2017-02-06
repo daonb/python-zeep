@@ -25,7 +25,7 @@ def load_external(url, transport, base_url=None):
 
 
 def absolute_location(location, base):
-    if location == base or location.startswith('intschema'):
+    if location == base:
         return location
 
     if urlparse(location).scheme in ('http', 'https'):
@@ -37,5 +37,13 @@ def absolute_location(location, base):
         if os.path.isabs(location):
             return location
         if base:
-            return os.path.join(os.path.dirname(base), location)
+            return os.path.realpath(
+                os.path.join(os.path.dirname(base), location))
     return location
+
+
+def is_relative_path(value):
+    """Check if the given value is a relative path"""
+    if urlparse(value).scheme in ('http', 'https', 'file'):
+        return False
+    return not os.path.isabs(value)

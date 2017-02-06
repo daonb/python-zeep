@@ -1,20 +1,16 @@
 import keyword
 import logging
 import re
-import warnings
 
 from lxml import etree
 
-from zeep import exceptions
-from zeep.exceptions import XMLParseError, ZeepWarning
+from zeep.exceptions import XMLParseError
 from zeep.parser import absolute_location
 from zeep.utils import as_qname, qname_attr
-from zeep.xsd import builtins as xsd_builtins
 from zeep.xsd import elements as xsd_elements
-from zeep.xsd import indicators as xsd_indicators
 from zeep.xsd import types as xsd_types
 from zeep.xsd.const import xsd_ns
-from zeep.xsd.parser import load_external
+from zeep.xsd.utils import load_external
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +37,9 @@ class SchemaVisitor(object):
     types in the given schema.
 
     """
-    def __init__(self, document, parser_context=None):
+    def __init__(self, schema, document):
         self.document = document
-        self.schema = document._schema
-        self.parser_context = parser_context
+        self.schema = schema
         self._includes = set()
 
     def process(self, node, parent):
@@ -131,25 +126,17 @@ class SchemaVisitor(object):
         if not namespace and not self.document._target_namespace:
             raise XMLParseError(
                 "The attribute 'namespace' must be existent if the "
-                "importing schema has no target namespace.")
+                "importing schema has no target namespace.",
+                filename=self._document.location,
+                sourceline=node.sourceline)
 
         # Check if the schema is already imported before based on the
         # namespace. Schema's without namespace are registered as 'None'
-        schema = self.parser_context.schema_objects.get(namespace)
-        if schema:
-            if location and schema._location != location:
-                # Use same warning message as libxml2
-                message = (
-                    "Skipping import of schema located at %r " +
-                    "for the namespace %r, since the namespace was " +
-                    "already imported with the schema located at %r"
-                    ) % (location, namespace or '(null)', schema._location)
-                warnings.warn(message, ZeepWarning, stacklevel=6)
-
-                return
+        document = self.schema._get_schema_document(namespace, location)
+        if document:
             logger.debug("Returning existing schema: %r", location)
-            self.document._imports[namespace] = schema
-            return schema
+            self.document.register_import(namespace, document)
+            return document
 
         # Hardcode the mapping between the xml namespace and the xsd for now.
         # This seems to fix issues with exchange wsdl's, see #220
@@ -165,8 +152,7 @@ class SchemaVisitor(object):
             return
 
         # Load the XML
-        schema_node = load_external(
-            location, self.document._transport, self.parser_context)
+        schema_node = load_external(location, self.schema._transport)
 
         # Check if the xsd:import namespace matches the targetNamespace. If
         # the xsd:import statement didn't specify a namespace then make sure
@@ -176,28 +162,12 @@ class SchemaVisitor(object):
             raise XMLParseError((
                 "The namespace defined on the xsd:import doesn't match the "
                 "imported targetNamespace located at %r "
-                ) % (location))
-        elif schema_tns in self.parser_context.schema_objects:
-            schema = self.parser_context.schema_objects.get(schema_tns)
-            message = (
-                "Skipping import of schema located at %r " +
-                "for the namespace %r, since the namespace was " +
-                "already imported with the schema located at %r"
-                ) % (location, namespace or '(null)', schema._location)
-            warnings.warn(message, ZeepWarning, stacklevel=6)
+                ) % (location),
+                filename=self.document._location,
+                sourceline=node.sourceline)
 
-        # If this schema location is 'internal' then retrieve the original
-        # location since that is used as base url for sub include/imports
-        if location in self.parser_context.schema_locations:
-            base_url = self.parser_context.schema_locations[location]
-        else:
-            base_url = location
-
-        schema = self.document.__class__(
-            schema_node, self.document._transport, self.schema, location,
-            self.parser_context, base_url)
-
-        self.document._imports[namespace] = schema
+        schema = self.schema.create_new_document(schema_node, location)
+        self.document.register_import(namespace, schema)
         return schema
 
     def visit_include(self, node, parent):
@@ -217,8 +187,7 @@ class SchemaVisitor(object):
             return
 
         schema_node = load_external(
-            location, self.document._transport, self.parser_context,
-            base_url=self.document._base_url)
+            location, self.schema._transport, base_url=self.document._base_url)
         self._includes.add(location)
 
         return self.visit_schema(schema_node)
@@ -288,7 +257,7 @@ class SchemaVisitor(object):
             if node_type:
                 xsd_type = self._get_type(node_type.text)
             else:
-                xsd_type = xsd_builtins.AnyType()
+                xsd_type = xsd_types.AnyType()
 
         # Naive workaround to mark fields which are part of a choice element
         # as optional
@@ -360,7 +329,7 @@ class SchemaVisitor(object):
             if node_type:
                 xsd_type = self._get_type(node_type)
             else:
-                xsd_type = xsd_builtins.AnyType()
+                xsd_type = xsd_types.AnyType()
 
         # TODO: We ignore 'prohobited' for now
         required = node.get('use') == 'required'
@@ -478,7 +447,7 @@ class SchemaVisitor(object):
                 element=element, attributes=attributes, qname=qname,
                 is_global=is_global)
         else:
-            xsd_type = xsd_cls(qname=qname)
+            xsd_type = xsd_cls(qname=qname, is_global=is_global)
 
         if is_global:
             self.document.register_type(qname, xsd_type)
@@ -690,7 +659,7 @@ class SchemaVisitor(object):
             tags.group, tags.sequence
         ]
         min_occurs, max_occurs = _process_occurs_attrs(node)
-        result = xsd_indicators.Sequence(
+        result = xsd_elements.Sequence(
             min_occurs=min_occurs, max_occurs=max_occurs)
 
         annotation, items = self._pop_annotation(node.getchildren())
@@ -719,7 +688,7 @@ class SchemaVisitor(object):
         sub_types = [
             tags.annotation, tags.element
         ]
-        result = xsd_indicators.All()
+        result = xsd_elements.All()
 
         for child in node.iterchildren():
             assert child.tag in sub_types, child
@@ -757,7 +726,7 @@ class SchemaVisitor(object):
         child = children[0]
 
         item = self.process(child, parent)
-        elm = xsd_indicators.Group(name=qname, child=item)
+        elm = xsd_elements.Group(name=qname, child=item)
 
         if parent.tag == tags.schema:
             self.document.register_group(qname, elm)
@@ -804,7 +773,7 @@ class SchemaVisitor(object):
         for child in children:
             elm = self.process(child, node)
             choices.append(elm)
-        return xsd_indicators.Choice(
+        return xsd_elements.Choice(
             choices, min_occurs=min_occurs, max_occurs=max_occurs)
 
     def visit_union(self, node, parent):
@@ -901,11 +870,7 @@ class SchemaVisitor(object):
     def _get_type(self, name):
         assert name is not None
         name = self._create_qname(name)
-        try:
-            retval = self.schema.get_type(name)
-        except (exceptions.NamespaceError, exceptions.LookupError):
-            retval = xsd_types.UnresolvedType(name, self.schema)
-        return retval
+        return xsd_types.UnresolvedType(name, self.schema)
 
     def _create_qname(self, name):
         if not isinstance(name, etree.QName):
@@ -922,7 +887,7 @@ class SchemaVisitor(object):
         # referenced.
         if (
             name.namespace == 'http://schemas.xmlsoap.org/soap/encoding/' and
-            name.namespace not in self.document._imports
+            not self.document.is_imported(name.namespace)
         ):
             import_node = etree.Element(
                 tags.import_,
@@ -943,11 +908,14 @@ class SchemaVisitor(object):
     def _process_attributes(self, node, items):
         attributes = []
         for child in items:
-            attribute = self.process(child, node)
             if child.tag in (tags.attribute, tags.attributeGroup, tags.anyAttribute):
+                attribute = self.process(child, node)
                 attributes.append(attribute)
             else:
-                raise XMLParseError("Unexpected tag: %s" % child.tag)
+                raise XMLParseError(
+                    "Unexpected tag `%s`" % (child.tag),
+                    filename=self.document._location,
+                    sourceline=node.sourceline)
         return attributes
 
     visitors = {

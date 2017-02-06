@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import copy
 import operator
 from collections import OrderedDict, defaultdict, deque
@@ -7,9 +5,12 @@ from collections import OrderedDict, defaultdict, deque
 from cached_property import threaded_cached_property
 
 from zeep.exceptions import UnexpectedElementError
-from zeep.xsd.elements import Any, Base, Element
+from zeep.xsd.const import NotSet, SkipValue
+from zeep.xsd.elements import Any, Element
+from zeep.xsd.elements.base import Base
 from zeep.xsd.utils import (
-    NamePrefixGenerator, UniqueNameGenerator, max_occurs_iter)
+    NamePrefixGenerator, UniqueNameGenerator, create_prefixed_name,
+    max_occurs_iter)
 
 __all__ = ['All', 'Choice', 'Group', 'Sequence']
 
@@ -36,11 +37,8 @@ class OrderIndicator(Indicator, list):
     def __init__(self, elements=None, min_occurs=1, max_occurs=1):
         self.min_occurs = min_occurs
         self.max_occurs = max_occurs
-
-        if elements is None:
-            super(OrderIndicator, self).__init__()
-        else:
-            super(OrderIndicator, self).__init__()
+        super(OrderIndicator, self).__init__()
+        if elements is not None:
             self.extend(elements)
 
     def clone(self, name, min_occurs=1, max_occurs=1):
@@ -118,6 +116,7 @@ class OrderIndicator(Indicator, list):
             assert name
 
         if name and name in available_kwargs:
+            assert self.accepts_multiple
 
             # Make sure we have a list, lame lame
             item_kwargs = kwargs.get(name)
@@ -125,7 +124,7 @@ class OrderIndicator(Indicator, list):
                 item_kwargs = [item_kwargs]
 
             result = []
-            for i, item_value in zip(max_occurs_iter(self.max_occurs), item_kwargs):
+            for item_value in max_occurs_iter(self.max_occurs, item_kwargs):
                 item_kwargs = set(item_value.keys())
                 subresult = OrderedDict()
                 for item_name, element in self.elements:
@@ -133,12 +132,14 @@ class OrderIndicator(Indicator, list):
                     if value is not None:
                         subresult.update(value)
 
+                if item_kwargs:
+                    raise TypeError((
+                        "%s() got an unexpected keyword argument %r."
+                    ) % (self, list(item_kwargs)[0]))
+
                 result.append(subresult)
 
-            if self.accepts_multiple:
-                result = {name: result}
-            else:
-                result = result[0] if result else None
+            result = {name: result}
 
             # All items consumed
             if not any(filter(None, item_kwargs)):
@@ -147,14 +148,13 @@ class OrderIndicator(Indicator, list):
             return result
 
         else:
+            assert not name
+            assert not self.accepts_multiple
             result = OrderedDict()
             for elm_name, element in self.elements_nested:
                 sub_result = element.parse_kwargs(kwargs, elm_name, available_kwargs)
                 if sub_result:
                     result.update(sub_result)
-
-            if name:
-                result = {name: result}
 
             return result
 
@@ -163,41 +163,41 @@ class OrderIndicator(Indicator, list):
             self[i] = elm.resolve()
         return self
 
-    def render(self, parent, value):
+    def render(self, parent, value, render_path):
         """Create subelements in the given parent object."""
         if not isinstance(value, list):
             values = [value]
         else:
             values = value
 
-        for i, value in zip(max_occurs_iter(self.max_occurs), values):
+        for value in max_occurs_iter(self.max_occurs, values):
             for name, element in self.elements_nested:
                 if name:
                     if name in value:
                         element_value = value[name]
+                        child_path = render_path + [name]
                     else:
-                        element_value = None
+                        element_value = NotSet
+                        child_path = render_path
                 else:
                     element_value = value
-                if element_value is not None or not element.is_optional:
-                    element.render(parent, element_value)
+                    child_path = render_path
 
-    def signature(self, depth=()):
-        """
-        Use a tuple of element names as depth indicator, so that when an element is repeated,
-        do not try to create its signature, as it would lead to infinite recursion
-        """
-        depth += (self.name,)
+                if element_value is SkipValue:
+                    continue
+
+                if element_value is not None or not element.is_optional:
+                    element.render(parent, element_value, child_path)
+
+    def signature(self, schema=None, standalone=True):
         parts = []
         for name, element in self.elements_nested:
-            if hasattr(element, 'type') and element.type.name and element.type.name in depth:
-                parts.append('{}: {}'.format(name, element.type.name))
-            elif name:
-                parts.append('%s: %s' % (name, element.signature(depth)))
-            elif isinstance(element,  Indicator):
-                parts.append('%s' % (element.signature(depth)))
+            if isinstance(element,  Indicator):
+                parts.append(element.signature(schema))
             else:
-                parts.append('%s: %s' % (name, element.signature(depth)))
+                value = element.signature(schema, standalone=False)
+                parts.append('%s: %s' % (name, value))
+
         part = ', '.join(parts)
 
         if self.accepts_multiple:
@@ -236,6 +236,7 @@ class All(OrderIndicator):
 
 
 class Choice(OrderIndicator):
+    """Permits one and only one of the elements contained in the group."""
 
     @property
     def is_optional(self):
@@ -249,7 +250,7 @@ class Choice(OrderIndicator):
         """Return a dictionary"""
         result = []
 
-        for i in max_occurs_iter(self.max_occurs):
+        for _unused in max_occurs_iter(self.max_occurs):
             if not xmlelements:
                 break
 
@@ -316,6 +317,8 @@ class Choice(OrderIndicator):
 
         """
         if name and name in available_kwargs:
+            assert self.accepts_multiple
+
             values = kwargs[name] or []
             available_kwargs.remove(name)
             result = []
@@ -323,9 +326,9 @@ class Choice(OrderIndicator):
             if isinstance(values, dict):
                 values = [values]
 
+            # TODO: Use most greedy choice instead of first matching
             for value in values:
                 for element in self:
-                    # TODO: Use most greedy choice instead of first matching
                     if isinstance(element, OrderIndicator):
                         choice_value = value[name] if name in value else value
                         if element.accept(choice_value):
@@ -374,7 +377,7 @@ class Choice(OrderIndicator):
             result = {name: result}
         return result
 
-    def render(self, parent, value):
+    def render(self, parent, value, render_path):
         """Render the value to the parent element tree node.
 
         This is a bit more complex then the order render methods since we need
@@ -388,7 +391,7 @@ class Choice(OrderIndicator):
             result = self._find_element_to_render(item)
             if result:
                 element, choice_value = result
-                element.render(parent, choice_value)
+                element.render(parent, choice_value, render_path)
 
     def accept(self, values):
         """Return the number of values which are accepted by this choice.
@@ -437,13 +440,13 @@ class Choice(OrderIndicator):
             matches = sorted(matches, key=operator.itemgetter(0), reverse=True)
             return matches[0][1:]
 
-    def signature(self, depth=()):
+    def signature(self, schema=None, standalone=True):
         parts = []
         for name, element in self.elements_nested:
             if isinstance(element, OrderIndicator):
-                parts.append('{%s}' % (element.signature(depth)))
+                parts.append('{%s}' % (element.signature(schema, standalone=False)))
             else:
-                parts.append('{%s: %s}' % (name, element.signature(depth)))
+                parts.append('{%s: %s}' % (name, element.signature(schema, standalone=False)))
         part = '(%s)' % ' | '.join(parts)
         if self.accepts_multiple:
             return '%s[]' % (part,)
@@ -451,10 +454,13 @@ class Choice(OrderIndicator):
 
 
 class Sequence(OrderIndicator):
+    """Requires the elements in the group to appear in the specified sequence
+    within the containing element.
 
+    """
     def parse_xmlelements(self, xmlelements, schema, name=None, context=None):
         result = []
-        for item in max_occurs_iter(self.max_occurs):
+        for _unused in max_occurs_iter(self.max_occurs):
             if not xmlelements:
                 break
 
@@ -494,15 +500,8 @@ class Group(Indicator):
         self.max_occurs = max_occurs
         self.min_occurs = min_occurs
 
-    def clone(self, name, min_occurs=1, max_occurs=1):
-        return self.__class__(
-            name=self.qname,
-            child=self.child,
-            min_occurs=min_occurs,
-            max_occurs=max_occurs)
-
     def __str__(self):
-        return '%s(%s)' % (self.name, self.signature())
+        return self.signature()
 
     def __iter__(self, *args, **kwargs):
         for item in self.child:
@@ -527,10 +526,15 @@ class Group(Indicator):
 
             result = []
             sub_name = '_value_1' if self.child.accepts_multiple else None
-            for i, sub_kwargs in zip(max_occurs_iter(self.max_occurs), item_kwargs):
+            for sub_kwargs in max_occurs_iter(self.max_occurs, item_kwargs):
                 available_sub_kwargs = set(sub_kwargs.keys())
                 subresult = self.child.parse_kwargs(
                     sub_kwargs, sub_name, available_sub_kwargs)
+
+                if available_sub_kwargs:
+                    raise TypeError((
+                        "%s() got an unexpected keyword argument %r."
+                    ) % (self, list(available_sub_kwargs)[0]))
 
                 if subresult:
                     result.append(subresult)
@@ -543,7 +547,7 @@ class Group(Indicator):
     def parse_xmlelements(self, xmlelements, schema, name=None, context=None):
         result = []
 
-        for i in max_occurs_iter(self.max_occurs):
+        for _unused in max_occurs_iter(self.max_occurs):
             result.append(
                 self.child.parse_xmlelements(
                     xmlelements, schema, name, context=context)
@@ -552,12 +556,23 @@ class Group(Indicator):
             return result[0]
         return {name: result}
 
-    def render(self, *args, **kwargs):
-        return self.child.render(*args, **kwargs)
+    def render(self, parent, value, render_path):
+        if not isinstance(value, list):
+            values = [value]
+        else:
+            values = value
+
+        for value in values:
+            self.child.render(parent, value, render_path)
 
     def resolve(self):
         self.child = self.child.resolve()
         return self
 
-    def signature(self, depth=()):
-        return self.child.signature(depth)
+    def signature(self, schema=None, standalone=True):
+        name = create_prefixed_name(self.qname, schema)
+        if standalone:
+            return '%s(%s)' % (
+                name, self.child.signature(schema, standalone=False))
+        else:
+            return  self.child.signature(schema, standalone=False)

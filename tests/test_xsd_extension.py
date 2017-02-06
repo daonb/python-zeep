@@ -3,7 +3,8 @@ import io
 
 from lxml import etree
 
-from tests.utils import DummyTransport, assert_nodes_equal, load_xml, render_node
+from tests.utils import (
+    DummyTransport, assert_nodes_equal, load_xml, render_node)
 from zeep import xsd
 
 
@@ -106,7 +107,7 @@ def test_complex_content_with_recursive_elements():
               <xsd:complexContent>
                 <xsd:extension base="tns:Name">
                   <xsd:sequence>
-                    <xsd:element name="children" type="tns:Pet"/>
+                    <xsd:element name="children" type="tns:Pet" minOccurs="0" maxOccurs="unbounded"/>
                   </xsd:sequence>
                 </xsd:extension>
               </xsd:complexContent>
@@ -122,10 +123,14 @@ def test_complex_content_with_recursive_elements():
         </xsd:schema>
     """))
     pet_type = schema.get_element('{http://tests.python-zeep.org/}Pet')
-    assert(pet_type.signature() == 'name: xsd:string, common_name: xsd:string, children: Pet')
+    assert(pet_type.signature(schema=schema) == 'ns0:Pet(ns0:Pet)')
+    assert(pet_type.type.signature(schema=schema) == 'ns0:Pet(name: xsd:string, common_name: xsd:string, children: ns0:Pet[])')
 
     obj = pet_type(
-        name='foo', common_name='bar')
+        name='foo', common_name='bar',
+        children=[
+            pet_type(name='child-1', common_name='child-cname-1')
+        ])
 
     node = etree.Element('document')
     pet_type.render(node, obj)
@@ -134,7 +139,10 @@ def test_complex_content_with_recursive_elements():
             <ns0:Pet xmlns:ns0="http://tests.python-zeep.org/">
                 <ns0:name>foo</ns0:name>
                 <ns0:common_name>bar</ns0:common_name>
-                <ns0:children/>
+                <ns0:children>
+                    <ns0:name>child-1</ns0:name>
+                    <ns0:common_name>child-cname-1</ns0:common_name>
+                </ns0:children>
             </ns0:Pet>
         </document>
     """
@@ -543,14 +551,14 @@ def test_complex_content_extension_with_sequence():
     address_type = schema.get_element('{http://tests.python-zeep.org/}SpecialPackage')
 
     obj = address_type(
-        id='testString', pkg_id='nameId')
+        id='testString', pkg_id='nameId', otherElement='foobar')
 
     node = etree.Element('document')
     address_type.render(node, obj)
     expected = """
         <document>
             <ns0:SpecialPackage xmlns:ns0="http://tests.python-zeep.org/" pkg_id="nameId" id="testString">
-                <ns0:otherElement/>
+                <ns0:otherElement>foobar</ns0:otherElement>
             </ns0:SpecialPackage>
         </document>
     """
